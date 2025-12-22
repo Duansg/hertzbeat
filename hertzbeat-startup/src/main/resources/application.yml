@@ -24,19 +24,12 @@ spring:
       server:
         enabled: true
         stdio: false
-        name: sse-mcp-server
+        protocol: streamable
+        streamable-http:
+          mcp-endpoint: /api/mcp
+        name: hertzbeat-mcp-server
         version: 1.0.0
-        resource-change-notification: true
-        tool-change-notification: true
-        prompt-change-notification: true
-        sse-endpoint: /api/sse
-        sse-message-endpoint: /api/mcp/message
         type: SYNC
-        capabilities:
-          tool: true
-          resource: true
-          prompt: true
-          completion: true
 
   mvc:
     static-path-pattern: /**
@@ -169,13 +162,11 @@ common:
 warehouse:
   store:
     # store history metrics data, enable only one below
-    jpa:
+    duckdb:
       enabled: true
       # The maximum retention time for history records, after which records will be deleted
-      expire-time: 1h
-      # The maximum number of history records retained, if this number is exceeded, half of the data in this configuration item will be deleted
-      # (please set this configuration reasonably as history records can affect performance when it is large)
-      max-history-record-num: 6000
+      expire-time: 90d
+      store-path: data/history.duckdb
     victoria-metrics:
       # Standalone mode toggle — must be set to false when using cluster mode
       enabled: false

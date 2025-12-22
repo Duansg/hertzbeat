@@ -61,6 +61,7 @@ import org.apache.hertzbeat.common.entity.message.CollectRep;
 import org.apache.hertzbeat.common.util.Base64Util;
 import org.apache.hertzbeat.common.util.JsonUtil;
 import org.apache.hertzbeat.common.util.TimePeriodUtil;
+import org.apache.hertzbeat.warehouse.constants.WarehouseConstants;
 import org.apache.hertzbeat.warehouse.store.history.tsdb.AbstractHistoryDataStorage;
 import org.apache.hertzbeat.warehouse.store.history.tsdb.vm.PromQlQueryContent;
 import org.apache.hertzbeat.warehouse.db.GreptimeSqlQueryExecutor;
@@ -90,9 +91,10 @@ public class GreptimeDbDataStorage extends AbstractHistoryDataStorage {
     private static final String LABEL_KEY_NAME = "__name__";
     private static final String LABEL_KEY_FIELD = "__field__";
     private static final String LABEL_KEY_INSTANCE = "instance";
-    private static final String LOG_TABLE_NAME = "hertzbeat_logs";
+    private static final String LOG_TABLE_NAME = WarehouseConstants.LOG_TABLE_NAME;
     private static final String LABEL_KEY_START_TIME = "start";
     private static final String LABEL_KEY_END_TIME = "end";
+    private static final int LOG_BATCH_SIZE = 500;
 
     private GreptimeDB greptimeDb;
 
@@ -768,6 +770,69 @@ public class GreptimeDbDataStorage extends AbstractHistoryDataStorage {
         } catch (Exception e) {
             log.error("[warehouse greptime-log] batchDeleteLogs error: {}", e.getMessage(), e);
             return false;
+        }
+    }
+
+    @Override
+    public void saveLogDataBatch(List<LogEntry> logEntries) {
+        if (!isServerAvailable() || logEntries == null || logEntries.isEmpty()) {
+            return;
+        }
+
+        int total = logEntries.size();
+        for (int i = 0; i < total; i += LOG_BATCH_SIZE) {
+            int end = Math.min(i + LOG_BATCH_SIZE, total);
+            List<LogEntry> batch = logEntries.subList(i, end);
+            doSaveLogBatch(batch);
+        }
+    }
+
+    private void doSaveLogBatch(List<LogEntry> logEntries) {
+        try {
+            TableSchema.Builder tableSchemaBuilder = TableSchema.newBuilder(LOG_TABLE_NAME);
+            tableSchemaBuilder.addTimestamp("time_unix_nano", DataType.TimestampNanosecond)
+                    .addField("observed_time_unix_nano", DataType.TimestampNanosecond)
+                    .addField("severity_number", DataType.Int32)
+                    .addField("severity_text", DataType.String)
+                    .addField("body", DataType.Json)
+                    .addField("trace_id", DataType.String)
+                    .addField("span_id", DataType.String)
+                    .addField("trace_flags", DataType.Int32)
+                    .addField("attributes", DataType.Json)
+                    .addField("resource", DataType.Json)
+                    .addField("instrumentation_scope", DataType.Json)
+                    .addField("dropped_attributes_count", DataType.Int32);
+
+            Table table = Table.from(tableSchemaBuilder.build());
+
+            for (LogEntry logEntry : logEntries) {
+                Object[] values = new Object[] {
+                        logEntry.getTimeUnixNano() != null ? logEntry.getTimeUnixNano() : System.nanoTime(),
+                        logEntry.getObservedTimeUnixNano() != null ? logEntry.getObservedTimeUnixNano() : System.nanoTime(),
+                        logEntry.getSeverityNumber(),
+                        logEntry.getSeverityText(),
+                        JsonUtil.toJson(logEntry.getBody()),
+                        logEntry.getTraceId(),
+                        logEntry.getSpanId(),
+                        logEntry.getTraceFlags(),
+                        JsonUtil.toJson(logEntry.getAttributes()),
+                        JsonUtil.toJson(logEntry.getResource()),
+                        JsonUtil.toJson(logEntry.getInstrumentationScope()),
+                        logEntry.getDroppedAttributesCount()
+                };
+                table.addRow(values);
+            }
+
+            CompletableFuture<Result<WriteOk, Err>> writeFuture = greptimeDb.write(table);
+            Result<WriteOk, Err> result = writeFuture.get(10, TimeUnit.SECONDS);
+
+            if (result.isOk()) {
+                log.debug("[warehouse greptime-log] Batch write {} logs successful", logEntries.size());
+            } else {
+                log.warn("[warehouse greptime-log] Batch write failed: {}", result.getErr());
+            }
+        } catch (Exception e) {
+            log.error("[warehouse greptime-log] Error saving log entries batch", e);
         }
     }
 
